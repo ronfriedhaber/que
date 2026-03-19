@@ -15,6 +15,7 @@ unsafe impl<T, const N: usize> Send for Consumer<T, N> {}
 pub struct Consumer<T, const N: usize> {
     spsc: NonNull<Channel<T, N>>,
     head: usize,
+    cached_tail: usize,
     items_since_last_sync: usize,
     consumer_index: usize,
     last_producer_heartbeat: usize,
@@ -86,6 +87,7 @@ impl<T: AnyBitPattern, const N: usize> Consumer<T, N> {
             Ok(Consumer {
                 spsc: NonNull::new_unchecked(buffer.cast()),
                 head: new_head,
+                cached_tail: new_head,
                 items_since_last_sync: 0,
                 consumer_index: 0,
                 last_producer_heartbeat: (*spsc)
@@ -105,7 +107,17 @@ impl<T: AnyBitPattern, const N: usize> Consumer<T, N> {
     /// Attempts to read the next element. Returns `None` if the
     /// consumer is caught up.
     pub fn pop(&mut self) -> Option<T> {
-        // Optimistically read value and then check if valid
+        if self.head == self.cached_tail {
+            self.cached_tail = unsafe {
+                (*self.spsc.as_ptr())
+                    .tail
+                    .load(Ordering::Acquire)
+            };
+            if self.head == self.cached_tail {
+                return None;
+            }
+        }
+
         let head_index = self.head & Self::MODULO_MASK;
         let value = unsafe {
             *(*self.spsc.as_ptr())
@@ -113,20 +125,6 @@ impl<T: AnyBitPattern, const N: usize> Consumer<T, N> {
                 .as_ptr()
                 .add(head_index)
         };
-
-        // Check if valid
-        // 1) is not previously read value
-        let tail = unsafe {
-            (*self.spsc.as_ptr())
-                .tail
-                .load(Ordering::Acquire)
-        };
-        let previously_read_or_uninitialized = tail <= self.head;
-
-        // Nothing else to read
-        if previously_read_or_uninitialized {
-            return None;
-        }
 
         self.head += 1;
         self.items_since_last_sync += 1;

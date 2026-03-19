@@ -13,6 +13,7 @@ use super::{burst_amount, Channel};
 pub struct Producer<T, const N: usize> {
     spsc: NonNull<Channel<T, N>>,
     tail: usize,
+    cached_head: usize,
     /// Number of elements written since last sync
     written: usize,
     last_consumer_heartbeat: usize,
@@ -62,6 +63,7 @@ impl<T: AnyBitPattern, const N: usize> Producer<T, N> {
             Ok(Producer {
                 spsc: NonNull::new(shmem.get_mut_ptr().cast()).unwrap(),
                 tail: spsc.tail.load(Ordering::Acquire),
+                cached_head: spsc.head.load(Ordering::Acquire),
                 written: 0,
                 last_consumer_heartbeat: spsc
                     .consumer_heartbeat
@@ -89,6 +91,7 @@ impl<T: AnyBitPattern, const N: usize> Producer<T, N> {
             Ok(Producer {
                 spsc: NonNull::new(shmem.get_mut_ptr().cast()).unwrap(),
                 tail: 0,
+                cached_head: 0,
                 written: 0,
                 last_consumer_heartbeat: spsc
                     .consumer_heartbeat
@@ -133,6 +136,7 @@ impl<T: AnyBitPattern, const N: usize> Producer<T, N> {
             Ok(Producer {
                 spsc: NonNull::new(buffer.cast()).unwrap(),
                 tail: spsc.tail.load(Ordering::Acquire),
+                cached_head: spsc.head.load(Ordering::Acquire),
                 written: 0,
                 last_consumer_heartbeat: spsc
                     .consumer_heartbeat
@@ -160,6 +164,7 @@ impl<T: AnyBitPattern, const N: usize> Producer<T, N> {
             Ok(Producer {
                 spsc: NonNull::new(buffer.cast()).unwrap(),
                 tail: 0,
+                cached_head: 0,
                 written: 0,
                 last_consumer_heartbeat: spsc
                     .consumer_heartbeat
@@ -198,6 +203,7 @@ impl<T: AnyBitPattern, const N: usize> Producer<T, N> {
             Ok(Producer {
                 spsc: NonNull::new(buffer.cast()).unwrap(),
                 tail: spsc.tail.load(Ordering::Acquire),
+                cached_head: spsc.head.load(Ordering::Acquire),
                 written: 0,
                 last_consumer_heartbeat: spsc
                     .consumer_heartbeat
@@ -217,13 +223,15 @@ impl<T: AnyBitPattern, const N: usize> Producer<T, N> {
     /// [QueError::Full].
     #[inline(always)]
     pub fn push(&mut self, value: &T) -> Result<(), QueError> {
-        // Check if full
-        let is_full = self.tail
-            == unsafe {
+        let mut is_full = self.tail == self.cached_head + N;
+        if is_full {
+            self.cached_head = unsafe {
                 (*self.spsc.as_ptr())
                     .head
-                    .load(Ordering::Relaxed)
-            } + N;
+                    .load(Ordering::Acquire)
+            };
+            is_full = self.tail == self.cached_head + N;
+        }
         if is_full {
             return Err(QueError::Full);
         }
